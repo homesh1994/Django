@@ -1,10 +1,13 @@
 import os.path
 import json
-import sys
+# import threading
+# import logging
+import schedule
+import time
+# import sys
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QVBoxLayout, QMessageBox, QComboBox
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -13,52 +16,14 @@ from googleapiclient.errors import HttpError
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
-class GoogleSheetsApp(QWidget):
+class GoogleSheetsApp:
     def __init__(self):
-        super().__init__()
-        self.init_ui()
+        # self.schedule_check()
+        # Schedule the check and send warning function to run on Friday nights
+        schedule.every().friday.at("23:55").do(self.check_and_send_warning)
+         # Schedule the submit mail button function to run on Friday nights
+        schedule.every().friday.at("23:55").do(self.on_submit)
 
-    def init_ui(self):
-        self.sheet_name_label = QLabel("Sheet Name:")
-        self.sheet_name_dropdown = QComboBox()
-        self.column_name_label = QLabel("Column Name:")
-        self.column_name_dropdown = QComboBox()
-        self.submit_button = QPushButton("Submit")
-        self.send_mail_button = QPushButton("Send Mail")
-
-        layout = QVBoxLayout()
-        layout.addWidget(self.sheet_name_label)
-        layout.addWidget(self.sheet_name_dropdown)
-        layout.addWidget(self.column_name_label)
-        layout.addWidget(self.column_name_dropdown)
-        layout.addWidget(self.submit_button)
-        layout.addWidget(self.send_mail_button)
-        self.setLayout(layout)
-        self.submit_button.clicked.connect(self.on_submit)
-        self.send_mail_button.clicked.connect(self.send_mail)
-        settings = self.read_settings()
-        spreadsheet_id = settings['spreadsheet_id']
-        creds = self.authenticate()
-
-        if creds:
-            service = build("sheets", "v4", credentials=creds)
-            spreadsheets = service.spreadsheets()
-            result = spreadsheets.get(spreadsheetId=spreadsheet_id).execute()
-            sheet_names = [sheet['properties']['title'] for sheet in result['sheets']]
-            self.sheet_name_dropdown.addItems(sheet_names)
-            self.sheet_name_dropdown.currentIndexChanged.connect(self.load_column_names)
-
-    def read_settings(self):
-        with open("settings.json", "r") as f:
-            settings = json.load(f)
-        return settings
-    
-    def get_column_index(self, column_name, header_row):
-        try:
-            return header_row.index(column_name)
-        except ValueError:
-            QMessageBox.warning(self, "Warning", f"Column '{column_name}' not found.")
-            return None
 
     def authenticate(self):
         creds = None
@@ -73,53 +38,121 @@ class GoogleSheetsApp(QWidget):
                 creds = flow.run_local_server(port=0)
             with open("token.json", "w") as token:
                 token.write(creds.to_json())
-        return creds   
+        return creds  
 
-    def send_email(self, receiver_email, message):
+    def read_settings(self):
+        with open("settings.json", "r") as f:
+            settings = json.load(f)
+        return settings
+
+    def send_negative_report_email(self, recipient_email, message):
         settings = self.read_settings()
         sender_email = settings['sender_email']
         sender_password = settings['sender_password']
         msg = MIMEMultipart()
         msg['From'] = sender_email
-        msg['To'] = receiver_email
-        msg['Subject'] = "Negative Values Report"
-        msg.attach(MIMEText(message, 'html'))
+        msg['To'] = recipient_email
+        msg['Subject'] = "Items Quantity Report"
+        message_with_heading = "<html><body><h2>Negative Shortage Items List </h2>"
+        message_with_heading += message 
+        message_with_heading += "</table></body></html>"
+        msg.attach(MIMEText(message_with_heading, 'html'))
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(sender_email, sender_password)
-        server.sendmail(sender_email, receiver_email, msg.as_string())
+        server.sendmail(sender_email, recipient_email, msg.as_string())
         server.quit()
 
-    def check_minimum_stock(self, values):
+
+    def send_warning_email(self, recipient_email, message):
         settings = self.read_settings()
-        minimum_stock_qty = None
-        required_order_qty = None
-        for row in values:
-            if len(row) >= 3:
-                if row[0] == "Minimum Stock Qty":
-                    minimum_stock_qty = float(row[1])
-                elif row[0] == "Required Order Qty":
-                    required_order_qty = float(row[2])
+        sender_email = settings['sender_email']
+        sender_password = settings['sender_password']
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = recipient_email
+        msg['Subject'] = "Warning"
+        message_with_heading = "<html><body><h2>Minimum Stock Qty Report</h2>"
+        message_with_heading += message  
+        message_with_heading += "</table></body></html>"
+        msg.attach(MIMEText(message_with_heading, 'html'))
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, recipient_email, msg.as_string())
+        server.quit()     
 
-        if minimum_stock_qty is None or required_order_qty is None:
-            QMessageBox.information(self, "Information", "Minimum Stock Qty or Required Order Qty not found.")
-            return
+    def check_and_send_warning(self):
+        try:
+            settings = self.read_settings()
+            spreadsheet_id = settings['spreadsheet_id']
+            item_name_column_index = settings.get('item_name_column_index', 1)
 
-        if minimum_stock_qty < 0.7 * required_order_qty:
-            recipient_email = settings['recipient_email']
-            sender_email = settings['sender_email']
-            sender_password = settings['sender_password']
-            message = f"Warning: Minimum Stock Qty ({minimum_stock_qty}) is less than 70% of Required Order Qty ({required_order_qty})."
-            self.send_email(sender_email, sender_password, recipient_email, "Warning: Minimum Stock Qty Alert", message)
-            QMessageBox.information(self, "Information", "Warning email sent successfully!")
-        else:
-            QMessageBox.information(self, "Information", "Minimum Stock Qty is above 70% of Required Order Qty.")    
+            selected_sheet_name = "Minimum Inventory"  
+
+            creds = self.authenticate()
+            if not creds:
+                return
+
+            service = build("sheets", "v4", credentials=creds)
+            sheet = service.spreadsheets()
+
+            result = sheet.values().get(spreadsheetId=spreadsheet_id, range=f"'{selected_sheet_name}'!A:ZZ").execute()
+            values = result.get("values", [])
+
+            if not values:
+                print("No data found.")
+                return
+
+            header_row = values[0]
+            minimum_index = None
+            required_index = None
+
+            for index, column_name in enumerate(header_row):
+                if column_name == "Minimum":
+                    minimum_index = index
+                elif column_name == "Required":
+                    required_index = index
+            
+            if minimum_index is None or required_index is None:
+                print("Minimum or Required column not found.")
+                return
+
+            warnings = []
+            for row in values[1:]:
+                try:
+                    minimum_value = float(row[minimum_index])
+                    required_value = float(row[required_index])
+                    if minimum_value >= 0.7 * required_value:
+                        warnings.append(row)
+                except (ValueError, IndexError):
+                    pass
+
+            if warnings:
+                recipient_email = settings['recipient_email']
+                sender_email = settings['sender_email']
+                message = "<html><body><table border='1'><tr><th>Item Name</th><th>Minimum Stock Qty</th><th>Required Order Qty</th></tr>"
+                for warning in warnings:
+                    if item_name_column_index < len(warning):
+                        message += f"<tr><td>{warning[item_name_column_index]}</td><td>{warning[minimum_index]}</td><td>{warning[required_index]}</td></tr>"
+                    else:
+                        print("Invalid item name index.")
+                message += "</table></body></html>"
+                self.send_warning_email(recipient_email, message)
+                print("Warning email sent successfully!")
+            else:
+                print("No items found with Minimum Stock Qty less than 70% of Required Order Qty.")
+        except Exception as ex:
+            print(f"An error occurred: {ex}")
+            
+    # def schedule_check(self):
+    #     threading.Timer(60.0, self.check_and_send_warning).start()
 
     def on_submit(self):
         settings = self.read_settings()
         spreadsheet_id = settings['spreadsheet_id']
-        sheet_name = self.sheet_name_dropdown.currentText()
-        column_name = self.column_name_dropdown.currentText().strip()
+        sheet_name = "Minimum Inventory"
+        column_name = "Shortage"
         creds = self.authenticate()
         if not creds:
             return
@@ -130,16 +163,23 @@ class GoogleSheetsApp(QWidget):
             result = sheet.values().get(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!1:1").execute()
             header_row = result.get("values", [])[0]
             
-            column_index = self.get_column_index(column_name, header_row)
+            column_index = None
+            for index, column in enumerate(header_row):
+                if column.strip().lower() == column_name.lower():
+                    column_index = index
+                    break
+            
             if column_index is None:
+                print(f"Column '{column_name}' not found.")
                 return
 
             result = sheet.values().get(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!A:ZZ").execute()
             values = result.get("values", [])
 
             if not values:
-                QMessageBox.information(self, "Information", "No data found.")
+                print("No data found.")
                 return
+            
             negative_values = []
             for row in values:
                 try:
@@ -148,44 +188,26 @@ class GoogleSheetsApp(QWidget):
                         negative_values.append(row)
                 except (ValueError, IndexError):
                     pass
+            
             if negative_values:
                 settings = self.read_settings()
-                html_table = "<table border='1'><tr><th>Item Name</th><th>Shortage Qty</th></tr>"
-                item_name_index = settings.get('item_name_column_index', 1)  
-                for row in negative_values:
-                    html_table += f"<tr><td>{row[item_name_index]}</td><td>{row[column_index]}</td></tr>"
-                html_table += "</table>"
                 recipient_email = settings['recipient_email']
-                self.send_email(recipient_email, html_table)
-
-                QMessageBox.information(self, "Information", "Email sent successfully!")
+                html_table = "<table border='1'><tr><th>Item Name</th><th>Shortage Qty</th></tr>"
+                for row in negative_values:
+                    html_table += f"<tr><td>{row[1]}</td><td>{row[column_index]}</td></tr>"
+                html_table += "</table>"
+                self.send_negative_report_email(recipient_email, html_table)
+                print("Email sent successfully!")
             else:
-                QMessageBox.information(self, "Information", f"No negative values found in column '{column_name}'.")
+                print(f"No negative values found in column '{column_name}'.")
         except HttpError as err:
-            QMessageBox.critical(self, "Error", str(err))
-
-    def load_column_names(self):
-        selected_sheet = self.sheet_name_dropdown.currentText()
-        settings = self.read_settings()
-        spreadsheet_id = settings['spreadsheet_id']
-        creds = self.authenticate()
-        if creds:
-            service = build("sheets", "v4", credentials=creds)
-            spreadsheets = service.spreadsheets()
-            result = spreadsheets.values().get(spreadsheetId=spreadsheet_id, range=f"'{selected_sheet}'!1:1").execute()
-            header_row = result.get("values", [])[0]
-            self.column_name_dropdown.clear()
-            self.column_name_dropdown.addItems(header_row)
-
-    def send_mail(self):
-        self.on_submit()
+            print(f"An HTTP error occurred: {err}")
 
 def main():
-    app = QApplication(sys.argv)
-    window = GoogleSheetsApp()
-    window.setWindowTitle("Google Sheets App")
-    window.show()
-    sys.exit(app.exec_())
+    app = GoogleSheetsApp()
+    while True:
+        schedule.run_pending()
+        time.sleep(60)# Wait for 60 seconds
 
 if __name__ == "__main__":
     main()
